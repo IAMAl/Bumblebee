@@ -28,7 +28,7 @@ A memory-efficient implementation of attention mechanism with ring buffers and t
 ## Usage
 - Basic Configuration
 ```pythhon
-pythonCopyconfig = RingBufferConfig(
+config = RingBufferConfig(
     buffer_size=2048,      # Size of ring buffers
     block_size=128,        # Processing block size
     tile_size=32,          # Tile size for flash attention
@@ -39,9 +39,11 @@ pythonCopyconfig = RingBufferConfig(
 
 ## Model Creation
 ```python
-pythonCopymodel = CompleteRingBufferAttention(config).cuda()
-Forward Pass
-pythonCopy# Encoder phase
+model = CompleteRingBufferAttention(config).cuda()
+```
+## Forward Pass
+```python
+# Encoder phase
 encoder_output, buffer_state = model(
     q=query,
     k=key,
