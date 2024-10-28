@@ -39,7 +39,7 @@ config = RingBufferConfig(
 
 ## Model Creation
 ```python
-model = CompleteRingBufferAttention(config).cuda()
+model = RingBufferAttention(config).cuda()
 ```
 ## Forward Pass
 ```python
