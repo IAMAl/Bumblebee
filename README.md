@@ -87,6 +87,7 @@ encoder_output, buffer_state = model(
     requires_grad=True
 )
 ```
+
 - Decoder phase
 ```python
 decoder_output = model(
@@ -169,26 +170,31 @@ model = RingBufferAttention(RingBufferConfig())
 model.tiling_processor.tile_order = TileOrder.Q_MAJOR
 model.train()
 ```
-# Forward pass with gradient
+- Forward pass with gradient
+```python
 output, state = model(query, key, value, requires_grad=True)
-
-# Decoder step with feedback
+```
+- Forward pass without gradient
+```python
+with torch.no_grad():
+    output, state = model(query, key, value, requires_grad=False)
+```
+-  Decoder step with feedback
+```python
 decoder_output = model(
     dec_query, dec_key, dec_value,
     position=pos,
     is_decoder=True,
     buffer_state=state
 )
-Inference Example
-pythonCopy# Create model
+```
+- Inference Example
+```python
+# Create model
 model = RingBufferAttention(RingBufferConfig())
 model.eval()
-
-## Forward pass without gradient
-```python
-with torch.no_grad():
-    output, state = model(query, key, value, requires_grad=False)
 ```
+
 
 ## Contributing
 Contributions are welcome! Some areas for potential improvements:
