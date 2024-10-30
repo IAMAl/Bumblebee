@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from xformers.components import Attention, AttentionConfig
 from xformers.components.attention import register_attention
 import math
-from enum import Enum
+from enum import Enum, auto
 
 
 class TileType(Enum):
@@ -140,17 +140,25 @@ class RingBuffer(nn.Module):
 
         return k_valid, v_valid, mask
 
+class TileOrder(Enum):
+    """Tile processing order strategies"""
+    Q_MAJOR = auto()  # Optimize for query reuse
+    K_MAJOR = auto()  # Optimize for key/value reuse
+
+
 class HierarchicalTilingProcessor:
     """Two-level hierarchical tile processing system"""
     def __init__(
         self,
         tile_size: int,
         head_tile_size: int,
-        causal: bool = True
+        causal: bool = True,
+        tile_order: TileOrder = TileOrder.Q_MAJOR
     ):
         self.tile_size = tile_size
         self.head_tile_size = head_tile_size
         self.causal = causal
+        self.tile_order = tile_order
 
     def get_tile_type(
         self,
@@ -299,81 +307,158 @@ class HierarchicalTilingProcessor:
         dropout_p: float = 0.0,
         training: bool = True
     ) -> torch.Tensor:
-        """Process attention using hierarchical tiling"""
+        """Process attention using hierarchical tiling with optimized ordering"""
         batch_size, seq_len, num_heads, head_dim = q.shape
-
+        
         # Initialize accumulators
         output = torch.zeros_like(q)
-        normalizer = torch.zeros(
-            (batch_size, num_heads, seq_len, 1),
-            device=q.device,
-            dtype=q.dtype
-        )
-
+        
         # Calculate number of tiles
         q_tiles = math.ceil(seq_len / self.tile_size)
         k_tiles = math.ceil(seq_len / self.tile_size)
         h_tiles = math.ceil(num_heads / self.head_tile_size)
-
-        # Upper level: Process tiles hierarchically
-        for h_idx in range(h_tiles):
-            h_start = h_idx * self.head_tile_size
-            h_end = min(h_start + self.head_tile_size, num_heads)
-
-            for q_idx in range(q_tiles):
-                q_start = q_idx * self.tile_size
-                q_end = min(q_start + self.tile_size, seq_len)
-
-                # Determine maximum key tiles based on causality
-                max_k_tiles = q_tiles if not self.causal else (q_idx + 1)
-
-                for k_idx in range(max_k_tiles):
+        
+        if self.tile_order == TileOrder.Q_MAJOR:
+            # Q-major ordering: Optimize for query reuse
+            # Process order: heads -> query -> key
+            # This maximizes reuse of query tiles across different key tiles
+            for h_idx in range(h_tiles):
+                h_start = h_idx * self.head_tile_size
+                h_end = min(h_start + self.head_tile_size, num_heads)
+                
+                for q_idx in range(q_tiles):
+                    # Initialize normalizer for this query tile
+                    normalizer = torch.zeros(
+                        (batch_size, num_heads, self.tile_size, 1),
+                        device=q.device,
+                        dtype=q.dtype
+                    )
+                    
+                    q_start = q_idx * self.tile_size
+                    q_end = min(q_start + self.tile_size, seq_len)
+                    
+                    # Load query tile once and reuse
+                    q_tile = q[:, q_start:q_end, h_start:h_end]
+                    
+                    # Process all relevant key tiles for this query tile
+                    max_k_tiles = q_tiles if not self.causal else (q_idx + 1)
+                    for k_idx in range(max_k_tiles):
+                        k_start = k_idx * self.tile_size
+                        k_end = min(k_start + self.tile_size, seq_len)
+                        
+                        tile_type = self.get_tile_type(q_idx, k_idx, self.causal)
+                        if tile_type == TileType.SKIP:
+                            continue
+                        
+                        tile = TileInfo(
+                            type=tile_type,
+                            q_start=q_start,
+                            q_end=q_end,
+                            k_start=k_start,
+                            k_end=k_end,
+                            h_start=h_start,
+                            h_end=h_end
+                        )
+                        
+                        if tile_type == TileType.DENSE:
+                            self.process_dense_tile(
+                                q_tile, k, v,  # Pass pre-loaded q_tile
+                                tile=tile,
+                                scale=scale,
+                                acc_output=output,
+                                acc_normalizer=normalizer,
+                                att_mask=att_mask,
+                                key_padding_mask=key_padding_mask,
+                                dropout_p=dropout_p,
+                                training=training
+                            )
+                        else:  # TRIANGLE
+                            self.process_triangle_tile(
+                                q_tile, k, v,  # Pass pre-loaded q_tile
+                                tile=tile,
+                                scale=scale,
+                                acc_output=output,
+                                acc_normalizer=normalizer,
+                                att_mask=att_mask,
+                                key_padding_mask=key_padding_mask,
+                                dropout_p=dropout_p,
+                                training=training
+                            )
+                    
+                    # Normalize the output for this query tile
+                    output[:, q_start:q_end, h_start:h_end] /= (normalizer + 1e-6)
+                    
+        else:  # TileOrder.K_MAJOR
+            # K-major ordering: Optimize for key/value reuse
+            # Process order: heads -> key -> query
+            # This maximizes reuse of key/value tiles across different query tiles
+            for h_idx in range(h_tiles):
+                h_start = h_idx * self.head_tile_size
+                h_end = min(h_start + self.head_tile_size, num_heads)
+                
+                for k_idx in range(k_tiles):
                     k_start = k_idx * self.tile_size
                     k_end = min(k_start + self.tile_size, seq_len)
-
-                    # Lower level: Determine tile type and process accordingly
-                    tile_type = self.get_tile_type(q_idx, k_idx, self.causal)
-
-                    if tile_type == TileType.SKIP:
-                        continue
-
-                    tile = TileInfo(
-                        type=tile_type,
-                        q_start=q_start,
-                        q_end=q_end,
-                        k_start=k_start,
-                        k_end=k_end,
-                        h_start=h_start,
-                        h_end=h_end
-                    )
-
-                    if tile_type == TileType.DENSE:
-                        self.process_dense_tile(
-                            q, k, v,
-                            tile=tile,
-                            scale=scale,
-                            acc_output=output,
-                            acc_normalizer=normalizer,
-                            att_mask=att_mask,
-                            key_padding_mask=key_padding_mask,
-                            dropout_p=dropout_p,
-                            training=training
+                    
+                    # Load key/value tiles once and reuse
+                    k_tile = k[:, k_start:k_end, h_start:h_end]
+                    v_tile = v[:, k_start:k_end, h_start:h_end]
+                    
+                    # Process all query tiles that can use this key tile
+                    min_q_tiles = k_idx if self.causal else 0
+                    for q_idx in range(min_q_tiles, q_tiles):
+                        # Initialize normalizer for this query tile
+                        normalizer = torch.zeros(
+                            (batch_size, num_heads, self.tile_size, 1),
+                            device=q.device,
+                            dtype=q.dtype
                         )
-                    else:  # TRIANGLE
-                        self.process_triangle_tile(
-                            q, k, v,
-                            tile=tile,
-                            scale=scale,
-                            acc_output=output,
-                            acc_normalizer=normalizer,
-                            att_mask=att_mask,
-                            key_padding_mask=key_padding_mask,
-                            dropout_p=dropout_p,
-                            training=training
+                        
+                        q_start = q_idx * self.tile_size
+                        q_end = min(q_start + self.tile_size, seq_len)
+                        
+                        tile_type = self.get_tile_type(q_idx, k_idx, self.causal)
+                        if tile_type == TileType.SKIP:
+                            continue
+                        
+                        tile = TileInfo(
+                            type=tile_type,
+                            q_start=q_start,
+                            q_end=q_end,
+                            k_start=k_start,
+                            k_end=k_end,
+                            h_start=h_start,
+                            h_end=h_end
                         )
-
-        # Normalize accumulated outputs
-        output = output / (normalizer + 1e-6)
+                        
+                        if tile_type == TileType.DENSE:
+                            self.process_dense_tile(
+                                q, k_tile, v_tile,  # Pass pre-loaded k,v tiles
+                                tile=tile,
+                                scale=scale,
+                                acc_output=output,
+                                acc_normalizer=normalizer,
+                                att_mask=att_mask,
+                                key_padding_mask=key_padding_mask,
+                                dropout_p=dropout_p,
+                                training=training
+                            )
+                        else:  # TRIANGLE
+                            self.process_triangle_tile(
+                                q, k_tile, v_tile,  # Pass pre-loaded k,v tiles
+                                tile=tile,
+                                scale=scale,
+                                acc_output=output,
+                                acc_normalizer=normalizer,
+                                att_mask=att_mask,
+                                key_padding_mask=key_padding_mask,
+                                dropout_p=dropout_p,
+                                training=training
+                            )
+                        
+                        # Normalize the output for this query tile
+                        output[:, q_start:q_end, h_start:h_end] /= (normalizer + 1e-6)
+        
         return output
 
 @register_attention("ring_buffer", RingBufferConfig)
