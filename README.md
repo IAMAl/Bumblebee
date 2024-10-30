@@ -1,47 +1,83 @@
 # Tiled Ring Buffer Attention
-A memory-efficient implementation of attention mechanism with ring buffers and tiled computation. This implementation combines several optimization techniques:
+A memory-efficient implementation of attention mechanism with ring buffers and hierarchical tiled computation. This implementation combines several optimization techniques:
+
 ## Features
-1. Triple Ring Buffer System
 
-- Forward KV Cache: For inference and non-gradient operations
-- Backward KV Cache: For gradient computation during training
-- Decoder Feedback Buffer: For decoder self-attention with output feedback
+- Triple Ring Buffer System
 
-2. FlashAttention-style Tiling
+    - Forward KV Cache: For inference and non-gradient operations
+    - Backward KV Cache: For gradient computation during training
+    - Decoder Feedback Buffer: For decoder self-attention with output feedback
 
-- Query/Key/Head tiling for memory efficiency
-- Block-based processing to optimize memory access
-- Configurable tile sizes for different memory constraints
 
-3. Skip Calculation System
+- Hierarchical Tiled Computation
 
-- Tracks last calculated positions
-- Skips unnecessary masking computations
-- Configurable prefill size for efficiency
+    - Two-level tiling hierarchy:
 
-4. xFormers Integration
+        - Upper level: Global tile management and scheduling
+        - Lower level: Specialized tile processing patterns
 
-## Registered attention module
+
+- Optimized tile processing orders:
+
+    - Q-major: Maximizes query tile reuse
+    - K-major: Maximizes key/value tile reuse
+
+
+- Intelligent tile type identification:
+
+    - Dense tiles: Full computation for non-causal regions
+    - Triangle tiles: Special handling for diagonal blocks
+    - Skip tiles: Automatic skipping of future tokens
+
+
+
+
+## Memory Optimization Strategies
+
+- Smart data reuse patterns
+- Per-tile normalization for stability
+- Configurable tile sizes for different hardware
+- Efficient memory access patterns
+
+
+## xFormers Integration
+
+- Registered attention module
 - Compatible with xFormers factory system
 - Follows xFormers configuration patterns
 
+
+
 ## Usage
 - Basic Configuration
-```pythhon
+```python
 config = RingBufferConfig(
+    # Required xFormers fields
+    num_heads=8,
+    head_dim=64,
+    dropout=0.1,
+    
+    # Ring buffer configuration
     buffer_size=2048,      # Size of ring buffers
     block_size=128,        # Processing block size
-    tile_size=32,          # Tile size for flash attention
+    tile_size=32,          # Tile size for tiled attention
     head_tile_size=4,      # Number of heads to process together
-    prefill_size=512       # Size of prefill cache for skip calculation
+    prefill_size=512,      # Size of prefill cache for skip calculation
+    causal=True           # Whether to use causal masking
 )
 ```
+- Model Creation
 
-## Model Creation
 ```python
 model = RingBufferAttention(config).cuda()
 ```
-## Forward Pass
+
+## Optionally specify tile processing order
+```python
+model.tiling_processor.tile_order = TileOrder.Q_MAJOR  # or K_MAJOR
+```
+- Forward Pass
 ```python
 # Encoder phase
 encoder_output, buffer_state = model(
@@ -51,7 +87,7 @@ encoder_output, buffer_state = model(
     requires_grad=True
 )
 ```
-## Decoder phase
+- Decoder phase
 ```python
 decoder_output = model(
     q=decoder_query,
@@ -59,34 +95,65 @@ decoder_output = model(
     v=decoder_value,
     position=current_pos,
     is_decoder=True,
-    buffer_state=buffer_state
+    att_mask=attention_mask,          # Optional attention mask
+    key_padding_mask=padding_mask,    # Optional padding mask
+    needs_weights=False,              # Whether to return attention weights
+    output_attentions=False          # Whether to return attention outputs
 )
 ```
-### Memory Optimization
-- Tiling Parameters
-- The implementation uses configurable tiling parameters:
 
-    - tile_size: Size of query/key tiles
-    - head_tile_size: Number of attention heads processed together
-    - block_size: Size of memory blocks in ring buffers
+## Memory Optimization
+### Tiling Strategies
+The implementation supports two tile processing orders:
 
-### Buffer Management
+- Q-major Ordering (Default)
+
+    - Optimizes for query tile reuse
+    - Better when query tiles are larger than key tiles
+    - Reduced memory bandwidth for query access
+```python
+model.tiling_processor.tile_order = TileOrder.Q_MAJOR
+```
+
+- K-major Ordering
+
+    - Optimizes for key/value tile reuse
+    - Better when key/value tiles are larger than query tiles
+    - Reduced memory bandwidth for key/value access
+
+```python
+model.tiling_processor.tile_order = TileOrder.K_MAJOR
+```
+
+## Tile Configuration
+Customize tile sizes based on your hardware:
+```python
+config = RingBufferConfig(
+    # ... other configs ...
+    tile_size=32,        # Size of Q/K tiles
+    head_tile_size=4,    # Heads processed together
+)
+```
+
+## Buffer Management
 
 - Fixed memory footprint regardless of sequence length
-- Efficient handling of long sequences
-- Automatic buffer rotation and reuse
+- Efficient ring buffer rotation
+- Automatic buffer state tracking
 
-### Performance Characteristics
+## Performance Characteristics
 - Space Complexity
 
     - O(buffer_size * head_dim) per ring buffer
     - Constant memory usage regardless of sequence length
+    - Additional tile workspace proportional to tile sizes
 
 - Time Complexity
 
     - O(n * d) for n tokens and d head dimension
-    - Reduced memory bandwidth through tiling
-    - Efficient skip calculation for decoder
+    - Reduced memory bandwidth through hierarchical tiling
+    - Efficient skip calculation for future tokens
+    - Optional attention weight computation when needed
 
 ## Requirements
 
@@ -94,36 +161,30 @@ decoder_output = model(
 - xFormers library
 - CUDA-capable GPU (recommended)
 
-
 ## Examples
 - Training Example
 ```python
-# Create model
+# Create model with specific tile order
 model = RingBufferAttention(RingBufferConfig())
+model.tiling_processor.tile_order = TileOrder.Q_MAJOR
 model.train()
 ```
-
-### Forward pass with gradient
-```python
+# Forward pass with gradient
 output, state = model(query, key, value, requires_grad=True)
-```
-### Decoder step with feedback
-```python
+
+# Decoder step with feedback
 decoder_output = model(
     dec_query, dec_key, dec_value,
     position=pos,
     is_decoder=True,
     buffer_state=state
 )
-```
-### Inference Example
-```python
-# Create model
-model = CompleteRingBufferAttention(RingBufferConfig())
+Inference Example
+pythonCopy# Create model
+model = RingBufferAttention(RingBufferConfig())
 model.eval()
-```
 
-### Forward pass without gradient
+## Forward pass without gradient
 ```python
 with torch.no_grad():
     output, state = model(query, key, value, requires_grad=False)
@@ -132,10 +193,11 @@ with torch.no_grad():
 ## Contributing
 Contributions are welcome! Some areas for potential improvements:
 
-- Additional tiling strategies
-- More skip calculation optimizations
-- Enhanced buffer management techniques
-- Performance benchmarks and optimizations
+Additional tile processing strategies
+- Auto-tuning for tile sizes and ordering
+- Hardware-specific optimizations
+- Performance profiling tools
+- Memory access pattern analysis
 
 ## License
 BSD 3-Clause License - See LICENSE file for details
