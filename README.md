@@ -30,7 +30,21 @@ A memory-efficient implementation of attention mechanism with ring buffers and h
     - Triangle tiles: Special handling for diagonal blocks
     - Skip tiles: Automatic skipping of future tokens
 
+## Triple Ring-Buffer System
 
+The ring buffer is used in hardware in general in order to efficienty buffer the data. The ring buffer have two pointers; read pointer and write pointer. After reading or writing data, the pointer is incremented, respectively. When the value of the pointer achieved to "size of buffer - 1" the value is set to zero, namely the pointers make a window (scope) of active datum in the buffer.
+
+The datum's width can be aligned with a line size of cache memory in host processor having data prefetch function. The ring-buffer has sequential access manner, so the prefetching works well with cache line alighnment. The host processor can efficiently provide datum to GPU without additional overheads.
+
+KV cache can be implemented by the ring-buffer having fixed size. It simple manaaged by the pointers. The encoder write into the ring-buffer and then write write pointer may be updated. The decoder read from the ring-buffer and then read pointer may be updated. The ordetred tensors make a sequential accesses to the ring-buffer, so the ring-buffer placed in linear addressing memory is sufficient, and utilized by the accessings.
+
+The masking in decoder takes only a part of matrix for Q*K^T matrix multiplication, therefore attention can skip the unnecessary data loadings and calculations. The FlashAttention uses a tiliing  before softmax operation for scoring attention. A ring-buffer for decoder's input from its output works for the right-shift for input, and masking taking only necessary part is supported by the ring-buffer's sequential data arrengement that has explicit data placement in the linear addressing memory.
+
+## Hierarchical Tiled Computation with Ring-Buffer
+
+We take idea of FlashAttention. FlashAttention takes tiling before softmax operation in attention. The the tensor is chunked to several blocks that can be fed into tile processsing. They use it for approximating the attention.  In stead, we use the idea for skipping unnecessary processings for tile-level in future vocablary in decoder.
+
+Proposal attention also takes similar system, and works with a ring-buffer that is placed between output to input of decoder, a feedback path. The output ring-bufffer can be accessed with sequential manner in linear address space of memory, and the masking pattern is very simple, thus the reading from the ring-buffer is also simple as an incremental read-length.
 
 
 ## Memory Optimization Strategies
@@ -42,6 +56,8 @@ A memory-efficient implementation of attention mechanism with ring buffers and h
 
 
 ## xFormers Integration
+
+Code of proposal attention is compatible with xFormers and uses the xFormers factory system.
 
 - Registered attention module
 - Compatible with xFormers factory system
@@ -64,7 +80,7 @@ config = RingBufferConfig(
     tile_size=32,          # Tile size for tiled attention
     head_tile_size=4,      # Number of heads to process together
     prefill_size=512,      # Size of prefill cache for skip calculation
-    causal=True           # Whether to use causal masking
+    causal=True            # Whether to use causal masking
 )
 ```
 - Model Creation
