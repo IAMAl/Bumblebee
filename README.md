@@ -36,7 +36,7 @@ The ring buffer is used in hardware in general in order to efficienty buffer the
 
 The datum's width can be aligned with a line size of cache memory in host processor having data prefetch function. The ring-buffer has sequential access manner, so the prefetching works well with cache line alighnment. The host processor can efficiently provide datum to GPU without additional overheads.
 
-KV cache can be implemented by the ring-buffer having fixed size. It simple manaaged by the pointers. The encoder write into the ring-buffer and then write write pointer may be updated. The decoder read from the ring-buffer and then read pointer may be updated. The ordetred tensors make a sequential accesses to the ring-buffer, so the ring-buffer placed in linear addressing memory is sufficient, and utilized by the accessings.
+KV cache can be implemented by the ring-buffer having fixed size. It is simply managed by the pointers. The encoder writes into the ring-buffer and then the write pointer may be updated. The decoder reads from the ring-buffer and then the read pointer may be updated. The ordetred tensors make a sequential accesses to the ring-buffer, so the ring-buffer placed in linear addressing memory is sufficient, and utilized by the sequential accessings.
 
 The masking in decoder takes only a part of matrix for Q*K^T matrix multiplication, therefore attention can skip the unnecessary data loadings and calculations. The FlashAttention uses a tiliing  before softmax operation for scoring attention. A ring-buffer for decoder's input from its output works for the right-shift for input, and masking taking only necessary part is supported by the ring-buffer's sequential data arrengement that has explicit data placement in the linear addressing memory.
 
