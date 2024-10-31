@@ -115,7 +115,7 @@ decoder_output = model(
     att_mask=attention_mask,          # Optional attention mask
     key_padding_mask=padding_mask,    # Optional padding mask
     needs_weights=False,              # Whether to return attention weights
-    output_attentions=False          # Whether to return attention outputs
+    output_attentions=False           # Whether to return attention outputs
 )
 ```
 
