@@ -131,7 +131,7 @@ decoder_output = model(
 
 1. Q-major Ordering (Default)
 ```python
-Copymodel.tiling_processor.tile_order = TileOrder.Q_MAJOR
+model.tiling_processor.tile_order = TileOrder.Q_MAJOR
 ```
 - Optimizes query tile reuse
 - Preferred when query tiles > key tiles
