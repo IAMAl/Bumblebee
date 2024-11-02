@@ -42,7 +42,7 @@ The masking in decoder takes only a part of matrix for Q*K^T matrix multiplicati
 
 ## Hierarchical Tiled Computation with Ring-Buffer
 
-We take idea of FlashAttention. FlashAttention takes tiling before softmax operation in attention. The the tensor is chunked to several blocks that can be fed into tile processsing. They use it for approximating the attention.  In stead, we use the idea for skipping unnecessary processings for tile-level in future vocablary in decoder.
+We take idea of FlashAttention. FlashAttention takes tiling before softmax operation in attention. The tensor is chunked to several blocks that can be fed into tile processsing. They use it for approximating the attention.  In stead, we use the idea for skipping unnecessary processings for tile-level in future vocablary in decoder.
 
 Proposal attention also takes similar system, and works with a ring-buffer that is placed between output to input of decoder, a feedback path. The output ring-bufffer can be accessed with sequential manner in linear address space of memory, and the masking pattern is very simple, thus the reading from the ring-buffer is also simple as an incremental read-length.
 
@@ -64,7 +64,6 @@ Code of proposal attention is compatible with xFormers and uses the xFormers fac
 - Follows xFormers configuration patterns
 
 
-
 ## Usage
 - Basic Configuration
 ```python
@@ -83,13 +82,13 @@ config = RingBufferConfig(
     causal=True            # Whether to use causal masking
 )
 ```
-- Model Creation
 
+- Model Creation
 ```python
 model = RingBufferAttention(config).cuda()
 ```
 
-## Optionally specify tile processing order
+- Optionally specify tile processing order
 ```python
 model.tiling_processor.tile_order = TileOrder.Q_MAJOR  # or K_MAJOR
 ```
