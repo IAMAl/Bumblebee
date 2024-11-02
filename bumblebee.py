@@ -4,15 +4,19 @@ from typing import Optional, Tuple, NamedTuple, Union
 from dataclasses import dataclass
 from xformers.components import Attention, AttentionConfig
 from xformers.components.attention import register_attention
-import math
 from enum import Enum, auto
-
+import math
 
 class TileType(Enum):
     """Types of attention computation"""
     DENSE = "dense"     # Full computation
     TRIANGLE = "triangle" # Special handling for diagonal tiles
     SKIP = "skip"      # Skip computation (outside causal mask)
+
+class TileOrder(Enum):
+    """Tile processing order strategies"""
+    Q_MAJOR = auto()  # Optimize for query reuse
+    K_MAJOR = auto()  # Optimize for key/value reuse
 
 @dataclass
 class RingBufferConfig(AttentionConfig):
@@ -22,6 +26,7 @@ class RingBufferConfig(AttentionConfig):
     head_dim: int
     dropout: float = 0.0
     attention_dropout: Optional[float] = None
+    seq_len: Optional[int] = None
 
     # Ring buffer specific configuration
     buffer_size: int = 2048
@@ -144,7 +149,6 @@ class TileOrder(Enum):
     """Tile processing order strategies"""
     Q_MAJOR = auto()  # Optimize for query reuse
     K_MAJOR = auto()  # Optimize for key/value reuse
-
 
 class HierarchicalTilingProcessor:
     """Two-level hierarchical tile processing system"""
@@ -309,15 +313,15 @@ class HierarchicalTilingProcessor:
     ) -> torch.Tensor:
         """Process attention using hierarchical tiling with optimized ordering"""
         batch_size, seq_len, num_heads, head_dim = q.shape
-        
+
         # Initialize accumulators
         output = torch.zeros_like(q)
-        
+
         # Calculate number of tiles
         q_tiles = math.ceil(seq_len / self.tile_size)
         k_tiles = math.ceil(seq_len / self.tile_size)
         h_tiles = math.ceil(num_heads / self.head_tile_size)
-        
+
         if self.tile_order == TileOrder.Q_MAJOR:
             # Q-major ordering: Optimize for query reuse
             # Process order: heads -> query -> key
@@ -325,7 +329,7 @@ class HierarchicalTilingProcessor:
             for h_idx in range(h_tiles):
                 h_start = h_idx * self.head_tile_size
                 h_end = min(h_start + self.head_tile_size, num_heads)
-                
+
                 for q_idx in range(q_tiles):
                     # Initialize normalizer for this query tile
                     normalizer = torch.zeros(
@@ -333,23 +337,23 @@ class HierarchicalTilingProcessor:
                         device=q.device,
                         dtype=q.dtype
                     )
-                    
+
                     q_start = q_idx * self.tile_size
                     q_end = min(q_start + self.tile_size, seq_len)
-                    
+
                     # Load query tile once and reuse
                     q_tile = q[:, q_start:q_end, h_start:h_end]
-                    
+
                     # Process all relevant key tiles for this query tile
                     max_k_tiles = q_tiles if not self.causal else (q_idx + 1)
                     for k_idx in range(max_k_tiles):
                         k_start = k_idx * self.tile_size
                         k_end = min(k_start + self.tile_size, seq_len)
-                        
+
                         tile_type = self.get_tile_type(q_idx, k_idx, self.causal)
                         if tile_type == TileType.SKIP:
                             continue
-                        
+
                         tile = TileInfo(
                             type=tile_type,
                             q_start=q_start,
@@ -359,7 +363,7 @@ class HierarchicalTilingProcessor:
                             h_start=h_start,
                             h_end=h_end
                         )
-                        
+
                         if tile_type == TileType.DENSE:
                             self.process_dense_tile(
                                 q_tile, k, v,  # Pass pre-loaded q_tile
@@ -384,10 +388,10 @@ class HierarchicalTilingProcessor:
                                 dropout_p=dropout_p,
                                 training=training
                             )
-                    
+
                     # Normalize the output for this query tile
                     output[:, q_start:q_end, h_start:h_end] /= (normalizer + 1e-6)
-                    
+
         else:  # TileOrder.K_MAJOR
             # K-major ordering: Optimize for key/value reuse
             # Process order: heads -> key -> query
@@ -395,15 +399,15 @@ class HierarchicalTilingProcessor:
             for h_idx in range(h_tiles):
                 h_start = h_idx * self.head_tile_size
                 h_end = min(h_start + self.head_tile_size, num_heads)
-                
+
                 for k_idx in range(k_tiles):
                     k_start = k_idx * self.tile_size
                     k_end = min(k_start + self.tile_size, seq_len)
-                    
+
                     # Load key/value tiles once and reuse
                     k_tile = k[:, k_start:k_end, h_start:h_end]
                     v_tile = v[:, k_start:k_end, h_start:h_end]
-                    
+
                     # Process all query tiles that can use this key tile
                     min_q_tiles = k_idx if self.causal else 0
                     for q_idx in range(min_q_tiles, q_tiles):
@@ -413,14 +417,14 @@ class HierarchicalTilingProcessor:
                             device=q.device,
                             dtype=q.dtype
                         )
-                        
+
                         q_start = q_idx * self.tile_size
                         q_end = min(q_start + self.tile_size, seq_len)
-                        
+
                         tile_type = self.get_tile_type(q_idx, k_idx, self.causal)
                         if tile_type == TileType.SKIP:
                             continue
-                        
+
                         tile = TileInfo(
                             type=tile_type,
                             q_start=q_start,
@@ -430,7 +434,7 @@ class HierarchicalTilingProcessor:
                             h_start=h_start,
                             h_end=h_end
                         )
-                        
+
                         if tile_type == TileType.DENSE:
                             self.process_dense_tile(
                                 q, k_tile, v_tile,  # Pass pre-loaded k,v tiles
@@ -455,10 +459,10 @@ class HierarchicalTilingProcessor:
                                 dropout_p=dropout_p,
                                 training=training
                             )
-                        
+
                         # Normalize the output for this query tile
                         output[:, q_start:q_end, h_start:h_end] /= (normalizer + 1e-6)
-        
+
         return output
 
 @register_attention("ring_buffer", RingBufferConfig)
@@ -513,7 +517,13 @@ class RingBufferAttention(Attention):
         position: Optional[int] = None,
         is_decoder: bool = False,
         requires_grad: bool = True,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        *args,
+        **kwargs
+    ) -> Union[
+        torch.Tensor,
+        Tuple[torch.Tensor, Optional[torch.Tensor]],
+        Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]
+    ]:
         """xFormers compatible forward pass with hierarchical tiling"""
         # Validate inputs
         self._validate_input(q, k, v)
@@ -552,10 +562,11 @@ class RingBufferAttention(Attention):
         self.last_calc_pos = torch.tensor([position], device=q.device)
 
         if needs_weights or output_attentions:
-            # Compute attention weights if requested
-            attn_weights = self._compute_attention_weights(
+            # Use xFormers compatible method for attention weights
+            context, attn_weights = self.get_attention_scores_and_context(
                 q, k_cached, v_cached,
-                att_mask=att_mask,
+                att_mask,
+                self.scale,
                 key_padding_mask=key_padding_mask
             )
 
@@ -565,100 +576,44 @@ class RingBufferAttention(Attention):
 
         return output
 
-    def _compute_attention_weights(
-        self,
+    @staticmethod
+    def get_attention_scores_and_context(
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        att_mask: Optional[torch.Tensor] = None,
+        att_mask: Optional[torch.Tensor],
+        scale: float,
         key_padding_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Compute attention weights for visualization or analysis"""
+        *args,
+        **kwargs
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """xFormers compatible method to compute attention scores and context"""
         batch_size, seq_len, num_heads, head_dim = q.shape
 
         # Reshape for batch matrix multiplication
         q = q.transpose(1, 2)  # [B, H, S, D]
         k = k.transpose(1, 2)  # [B, H, S, D]
+        v = v.transpose(1, 2)  # [B, H, S, D]
 
         # Compute attention scores
-        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # [B, H, S, S]
+        scores = torch.matmul(q, k.transpose(-2, -1)) * scale
 
-        # Apply causal mask if needed
-        if self.config.causal:
-            causal_mask = torch.triu(
-                torch.ones(seq_len, seq_len, dtype=torch.bool, device=scores.device),
-                diagonal=1
-            )
-            scores.masked_fill_(causal_mask, float('-inf'))
-
-        # Apply attention mask if provided
         if att_mask is not None:
             scores = scores.masked_fill(~att_mask, float('-inf'))
 
-        # Apply key padding mask if provided
         if key_padding_mask is not None:
             scores = scores.masked_fill(
-                key_padding_mask.unsqueeze(1).unsqueeze(2),  # [B, 1, 1, S]
+                key_padding_mask.unsqueeze(1).unsqueeze(2),
                 float('-inf')
             )
 
-        # Compute attention weights
-        attn_weights = torch.softmax(scores, dim=-1)
+        att_weights = torch.softmax(scores, dim=-1)
+        context = torch.matmul(att_weights, v)
 
-        if self.dropout_p > 0.0 and self.training:
-            attn_weights = torch.nn.functional.dropout(
-                attn_weights,
-                p=self.dropout_p
-            )
+        # Reshape back
+        context = context.transpose(1, 2)  # [B, S, H, D]
 
-        return attn_weights
-
-    def reset_buffers(self):
-        """Reset all ring buffers"""
-        self.kv_forward.reset_buffers()
-        self.kv_backward.reset_buffers()
-        self.decoder_feedback.reset_buffers()
-        self.last_calc_pos.zero_()
-        self._seq_len_cached = 0
-
-    @staticmethod
-    def create_upgrade_config(
-        num_heads: int,
-        head_dim: int,
-        seq_length: int,
-        dropout: float = 0.0,
-    ) -> RingBufferConfig:
-        """Create a config with reasonable defaults based on sequence length"""
-        # Calculate reasonable buffer size based on sequence length
-        buffer_size = min(2048, max(512, seq_length * 2))
-
-        # Calculate block and tile sizes based on sequence length
-        block_size = min(128, max(32, seq_length // 8))
-        tile_size = min(32, max(8, block_size // 4))
-        head_tile_size = min(4, max(1, num_heads // 4))
-
-        return RingBufferConfig(
-            num_heads=num_heads,
-            head_dim=head_dim,
-            dropout=dropout,
-            buffer_size=buffer_size,
-            block_size=block_size,
-            tile_size=tile_size,
-            head_tile_size=head_tile_size,
-            prefill_size=min(512, seq_length)
-        )
-
-    def extra_repr(self) -> str:
-        """String representation of module"""
-        return (
-            f"num_heads={self.config.num_heads}, "
-            f"head_dim={self.config.head_dim}, "
-            f"dropout={self.config.dropout}, "
-            f"buffer_size={self.config.buffer_size}, "
-            f"block_size={self.config.block_size}, "
-            f"tile_size={self.config.tile_size}, "
-            f"head_tile_size={self.config.head_tile_size}"
-        )
+        return context, att_weights
 
     def _validate_input(
         self,
